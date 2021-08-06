@@ -39,7 +39,7 @@ pub struct Device {
 }
 
 impl Device {
-    pub fn with_config(config: &DeviceConfig) -> Result<Self, Error> {
+    pub fn with_config(config: DeviceConfig) -> Result<Self, Error> {
         let handle = unsafe {
             let device_name = CStr::from_bytes_with_nul_unchecked(b"default\0").as_ptr();
             ptr_init!(*mut ffi::snd_pcm_t, |p| ffi::snd_pcm_open(

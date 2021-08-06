@@ -18,7 +18,7 @@ fn main() {
 
     let mut signal = signal::rate(SAMPLE_RATE as f64).const_hz(261.63).sine();
 
-    let device = Device::with_config(&config).unwrap();
+    let device = Device::with_config(config).unwrap();
     println!("{:?}", device);
 
     device.run(move |queue, wanted| {
