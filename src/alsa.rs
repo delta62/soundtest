@@ -50,58 +50,41 @@ impl Device {
             ))?
         };
 
-        let mut buffer_size = 0;
-        let mut buffer_time = config.buffer_target_us;
-        let mut period_size = 0;
-        let mut period_time = config.period_target_us;
-        let mut sample_rate = config.sample_rate;
-
         let fmt = if cfg!(target_endian = "big") {
             ffi::SND_PCM_FORMAT_FLOAT_BE
         } else {
             ffi::SND_PCM_FORMAT_FLOAT_LE
         };
 
+        let mut hw_params = HwParams::new()?;
+        let mut sample_rate = config.sample_rate;
+        let mut buffer_time = config.buffer_target_us;
+        let mut period_time = config.period_target_us;
+
         unsafe {
-            let hw_params = ptr_init!(
-                *mut ffi::snd_pcm_hw_params_t,
-                |p| ffi::snd_pcm_hw_params_malloc(p)
-            )?;
+            code!(ffi::snd_pcm_hw_params_any(handle, hw_params.as_mut_ptr()))?;
+            code!(ffi::snd_pcm_hw_params_set_channels(handle, hw_params.as_mut_ptr(), config.channels))?;
+            code!(ffi::snd_pcm_hw_params_set_rate_near(handle, hw_params.as_mut_ptr(), &mut sample_rate, &mut 0))?;
+            code!(ffi::snd_pcm_hw_params_set_rate_resample(handle, hw_params.as_mut_ptr(), 1))?;
+            code!(ffi::snd_pcm_hw_params_set_format(handle, hw_params.as_mut_ptr(), fmt))?;
+            code!(ffi::snd_pcm_hw_params_set_access(handle, hw_params.as_mut_ptr(), ffi::SND_PCM_ACCESS_RW_INTERLEAVED))?;
+            code!(ffi::snd_pcm_hw_params_set_buffer_time_near(handle, hw_params.as_mut_ptr(), &mut buffer_time, &mut 0))?;
+            code!(ffi::snd_pcm_hw_params_set_period_time_near(handle, hw_params.as_mut_ptr(), &mut period_time, &mut 0))?;
+            code!(ffi::snd_pcm_hw_params(handle, hw_params.as_mut_ptr()))?;
+        }
 
-            code!(ffi::snd_pcm_hw_params_any(handle, hw_params))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_set_channels(handle, hw_params, config.channels)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_set_rate_near(handle, hw_params, &mut sample_rate, &mut 0)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_set_rate_resample(handle, hw_params, 1)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_set_format(handle, hw_params, fmt)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_set_access(handle, hw_params, ffi::SND_PCM_ACCESS_RW_INTERLEAVED)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_set_buffer_time_near(handle, hw_params, &mut buffer_time, &mut 0)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_set_period_time_near(handle, hw_params, &mut period_time, &mut 0)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_get_buffer_size(hw_params, &mut buffer_size)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params_get_period_size(hw_params, &mut period_size, &mut 0)))
-                .and_then(|_| code!(ffi::snd_pcm_hw_params(handle, hw_params)))
-                .map(|_| ffi::snd_pcm_hw_params_free(hw_params))
-                .map_err(|e| {
-                    ffi::snd_pcm_hw_params_free(hw_params);
-                    e
-                })?;
+        let buffer_size = hw_params.buffer_size()?;
+        let period_size = hw_params.period_size()?;
+        let start_threshold = (buffer_size / period_size) * period_size;
+        let can_transfer_threshold = period_size;
 
-            let sw_params = ptr_init!(
-                *mut ffi::snd_pcm_sw_params_t,
-                |p| ffi::snd_pcm_sw_params_malloc(p)
-            )?;
+        unsafe {
+            let mut sw_params = SwParams::new()?;
 
-            let start_threshold = (buffer_size / period_size) * period_size;
-            let can_transfer_threshold = period_size;
-
-            code!(ffi::snd_pcm_sw_params_current(handle, sw_params))
-                .and_then(|_| code!(ffi::snd_pcm_sw_params_set_start_threshold(handle, sw_params, start_threshold)))
-                .and_then(|_| code!(ffi::snd_pcm_sw_params_set_avail_min(handle, sw_params, can_transfer_threshold)))
-                .and_then(|_| code!(ffi::snd_pcm_sw_params(handle, sw_params)))
-                .map(|_| ffi::snd_pcm_sw_params_free(sw_params))
-                .map_err(|e| {
-                    ffi::snd_pcm_sw_params_free(sw_params);
-                    e
-                })?;
+            code!(ffi::snd_pcm_sw_params_current(handle, sw_params.as_mut_ptr()))?;
+            code!(ffi::snd_pcm_sw_params_set_start_threshold(handle, sw_params.as_mut_ptr(), start_threshold))?;
+            code!(ffi::snd_pcm_sw_params_set_avail_min(handle, sw_params.as_mut_ptr(), can_transfer_threshold))?;
+            code!(ffi::snd_pcm_sw_params(handle, sw_params.as_mut_ptr()))?;
 
             code!(ffi::snd_pcm_prepare(handle))?;
         }
@@ -151,5 +134,69 @@ impl Drop for Device {
             ffi::snd_pcm_drop(self.handle);
             ffi::snd_pcm_hw_free(self.handle);
         }
+    }
+}
+
+struct HwParams(*mut ffi::snd_pcm_hw_params_t);
+
+impl HwParams {
+    fn new() -> Result<Self, Error> {
+        let pointer = ptr_init!(
+            *mut ffi::snd_pcm_hw_params_t,
+            |p| unsafe { ffi::snd_pcm_hw_params_malloc(p) }
+        )?;
+
+        Ok(Self(pointer))
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut ffi::snd_pcm_hw_params_t {
+        self.0
+    }
+
+    fn buffer_size(&self) -> Result<u64, Error> {
+        let mut buffer_size = 0;
+        unsafe {
+            code!(ffi::snd_pcm_hw_params_get_buffer_size(self.0, &mut buffer_size))?;
+        }
+
+        Ok(buffer_size)
+    }
+
+    fn period_size(&self) -> Result<u64, Error> {
+        let mut period_size = 0;
+        unsafe {
+            code!(ffi::snd_pcm_hw_params_get_period_size(self.0, &mut period_size, &mut 0))?;
+        }
+
+        Ok(period_size)
+    }
+}
+
+impl Drop for HwParams {
+    fn drop(&mut self) {
+        unsafe { ffi::snd_pcm_hw_params_free(self.0) }
+    }
+}
+
+struct SwParams(*mut ffi::snd_pcm_sw_params_t);
+
+impl SwParams {
+    fn new() -> Result<Self, Error> {
+        let pointer = ptr_init!(
+            *mut ffi::snd_pcm_sw_params_t,
+            |p| unsafe { ffi::snd_pcm_sw_params_malloc(p) }
+        )?;
+
+        Ok(Self(pointer))
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut ffi::snd_pcm_sw_params_t {
+        self.0
+    }
+}
+
+impl Drop for SwParams {
+    fn drop(&mut self) {
+        unsafe { ffi::snd_pcm_sw_params_free(self.0) }
     }
 }
